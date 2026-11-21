@@ -1,0 +1,14 @@
+# vegas26 GSI: start the vendor NXP NFC HAL that a GSI otherwise leaves off.
+#
+# /vendor/etc/init/vendor.nxp.hardware.nfc@1.2-service.rc declares
+# vendor.nfc_hal_service as "disabled" and only starts it on:
+#     on property:ro.vendor.hw.nfc=nq && property:persist.vendor.nfc.config_file_name=*
+# ro.vendor.hw.nfc is set by the vendor, but persist.vendor.nfc.config_file_name
+# is set by a Motorola component that a GSI doesn't ship, so it stays empty and
+# the HAL never starts.
+#
+# Set it ourselves when the vendor reports the NFC chip present; init then fires
+# the vendor trigger and the HAL registers. Deploy to /product/etc/init/ (which
+# survives GSI system flashes), owner 0:0, mode 0644, u:object_r:system_file:s0.
+on property:ro.vendor.hw.nfc=nq
+    setprop persist.vendor.nfc.config_file_name libnfc-nxp.conf

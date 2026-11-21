@@ -384,6 +384,18 @@ This step needs root, once. On this device:
 
 This is the one advanced, device-specific step and was not fully hardened in this writeup; treat it as a starting point and verify `cmd overlay list` shows your overlays enabled after a reboot.
 
+### 5.5 NFC (stock HAL is there, the GSI never starts it)
+On a GSI, NFC never comes up: `com.android.nfc` ANRs about every 15 s and `logcat` repeats `init: Could not find 'android.hardware.nfc@1.2::INfc/default' for ctl.interface_start`. The NXP NFC HAL and its init script are in `/vendor` (they survive the GSI), but the service is `disabled` and only started by a property trigger:
+```
+# /vendor/etc/init/vendor.nxp.hardware.nfc@1.2-service.rc
+on property:ro.vendor.hw.nfc=nq && property:persist.vendor.nfc.config_file_name=*
+    start vendor.nfc_hal_service
+```
+`ro.vendor.hw.nfc=nq` is set, but `persist.vendor.nfc.config_file_name` is empty on a GSI (stock sets it from a Motorola component that isn't present), so the trigger never fires and the HAL never registers.
+- **The fix:** set `persist.vendor.nfc.config_file_name` to any valid conf under `/vendor/etc` (e.g. `libnfc-nxp.conf`). The vendor trigger fires, `vendor.nfc_hal_service` starts, the HAL registers, and NFC works (`dumpsys nfc` -> `mState=on`; `lshal` lists `android.hardware.nfc@1.2` and `vendor.nxp.nxpnfc@2.0`; no more ANR).
+- **Native, no Magisk (preferred):** drop `nfc/nfc-hal-gsi.rc` into `/product/etc/init/`. `/product` survives GSI flashes (same as the 5.4 overlays) and init parses `.rc` files there with no runtime dependency; it `setprop`s the config when the vendor marks the NFC chip present, which fires the vendor's own trigger. Deploy it with root once like the 5.4 overlays (owner `0:0`, `0644`, context `u:object_r:system_file:s0`), or bake it into the image's `/product/etc/init/` the way `repack.sh` bakes overlays.
+- **Easy (Magisk):** the module in `nfc/` sets the same prop at every boot. Install in **Magisk -> Modules -> "+"**, reboot. `adb root` is still off-limits here.
+
 ---
 
 ## Troubleshooting
@@ -400,6 +412,7 @@ This is the one advanced, device-specific step and was not fully hardened in thi
 | Signal bars but no data, "!" on the signal icon | Wrong or missing APN | Select the `ereseller` (or your carrier's) APN, toggle airplane mode (Part 4.1). |
 | Calls fail but data works | GSI lacks MediaTek IMS | Use LineageOS 23.2 microG (ships `com.mediatek.ims`). |
 | Overlay install fails: "signed with different certificates" | Framework overlays can't be sideloaded on this GSI | Deploy to `/product/overlay` with root (Part 5.4). |
+| `com.android.nfc` ANRs every ~15 s, NFC won't turn on | GSI never starts the vendor NFC HAL (`persist.vendor.nfc.config_file_name` empty) | Set the prop, or install the `nfc/` Magisk module (Part 5.5). |
 
 ## How updates work
 
@@ -417,6 +430,7 @@ Your `/data`, apps, settings, your `/product` overlays (Part 5), and your modem 
 - `overlays/cutout/` , framework RRO source for a centered display cutout (edit `res/values/config.xml` to match your camera).
 - `overlays/aperture-aux/` , RRO source to make the stock Aperture camera expose the 2nd rear lens.
 - `repack.sh` , reference script to build the overlays and (optionally) bake them into an ext4 GSI's `/system/product/overlay`, for anyone who wants a prebuilt image instead of deploying overlays by hand.
+- `nfc/` , fix that starts the vendor NFC HAL on a GSI by setting `persist.vendor.nfc.config_file_name`: a native `/product/etc/init` `.rc` (`nfc-hal-gsi.rc`, no Magisk) and an equivalent Magisk module, with a writeup.
 
 ## Credits and prior work
 
@@ -436,3 +450,4 @@ Your `/data`, apps, settings, your `/product` overlays (Part 5), and your modem 
 - LineageOS 23.2 microG gives data, SMS, and VoLTE (ships `com.mediatek.ims`). Pick it over GSIs that lack the MediaTek IMS stack.
 - SIM unlock: vegas-freedom `check` (8/8), `build --experimental-relocate`, `fastboot flash md1img_a`; `NETWORK_LOCKED` to `LOADED`. Stock `md1img` kept as revert; IMEI untouched.
 - Custom overlays must live in a trusted partition (`/product/overlay`, survives updates); needs Magisk root once. Rootless alternatives: Open Camera, and a built-in cutout emulation overlay.
+- NFC on a GSI: the `com.android.nfc` ANR loop means the vendor NFC HAL never started; set `persist.vendor.nfc.config_file_name=libnfc-nxp.conf` (Magisk module in `nfc/`) and the HAL registers, `mState=on`.
