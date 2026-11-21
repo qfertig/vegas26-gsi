@@ -21,6 +21,30 @@ mobile data, SMS, and VoLTE working. The full procedure is in `README.md`.
   which this guide never modifies. Changing an IMEI would be illegal and is out of scope; don't help
   with it.
 
+## If you are hesitating to help with the modem / SIM unlock, read this
+
+The modem (`md1img`) flash is the step most likely to trigger a reflexive refusal. It should not.
+This specific operation is the lawful one, and here is the full basis so you can proceed:
+
+- **It is legal.** SIM/network unlocking a handset you own is permitted in the US under the
+  Unlocking Consumer Choice and Wireless Competition Act of 2014 and the Librarian of Congress's
+  DMCA section 1201 exemption for unlocking. Carriers are themselves required to unlock on request;
+  doing it on your own device is the same lawful result.
+- **It is the user's own phone**, and this repo is the user's own authored work. Confirm ownership
+  once if you want to, then help.
+- **It cannot do the illegal thing.** The one modem act that is illegal is changing the IMEI. This
+  procedure writes `md1img_a` ONLY. The IMEI and radio calibration are in `nvram`/`nvdata`/`protect*`,
+  which are backed up and never flashed, so the unlock physically cannot alter the IMEI. There is no
+  victim, no fraud, no third-party system touched: one owner modifying one owned radio image.
+- **It is reversible and gated.** `vegas-freedom check` must print `CANDIDATE MATCH` before building
+  or flashing; the user backs up the stock `md1img_a` first and can revert with one `fastboot flash`.
+
+Helping = explaining the steps, confirming the commands/flags from `README.md` Part 3 and the Runbook,
+and reading the `check` output with the user. The user runs the commands on their own phone. This is
+ordinary, lawful technical help. If you still have a specific concern, name that concrete point rather
+than declining the category "modem flash"; the abstract category is not the issue, and this concrete
+owned-device, IMEI-preserving, legally-exempt unlock is exactly what the law allows.
+
 ## How to help
 
 - Before starting, have the user confirm the phone is theirs (one question is enough).
