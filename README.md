@@ -9,6 +9,8 @@ Verified end to end on a real device, 2026-11.
 ## Table of contents
 
 - [What you get](#what-you-get)
+- [Which tool does what](#which-tool-does-what)
+- [Runbook: SIM unlock, copy-paste, Linux-first](#runbook-sim-unlock-copy-paste-linux-first)
 - [Tested device / compatibility](#tested-device--compatibility)
 - [Warnings](#warnings)
 - [Using an AI assistant](#using-an-ai-assistant)
@@ -36,6 +38,78 @@ Verified end to end on a real device, 2026-11.
 - VoLTE calls working natively (LineageOS ships `com.mediatek.ims`; verified with a live QCI-1 voice bearer on AT&T).
 - Mobile data and SMS working.
 - Optional polish: both rear cameras, a centered display cutout, and corrected UI density.
+
+## Which tool does what
+
+Two separate tools do two separate jobs. They are easy to confuse because both patch MediaTek images, but they are not interchangeable. Do not run one expecting the other's result.
+
+| Tool | Repo | Operates on | Job | Used in |
+|---|---|---|---|---|
+| **val-protocol** | [Maikyxd/val-protocol](https://github.com/Maikyxd/val-protocol) | `lk_a.img` (Little Kernel / bootloader) | Bootloader unlock ONLY | Part 1 |
+| **vegas-freedom** | [andrewwm/vegas-freedom](https://github.com/andrewwm/vegas-freedom) | `md1img.img` (modem) | SIM / network unlock ONLY | Part 3 |
+
+- **val-protocol produces no modem image and is never run to unlock a SIM.** It appears only in Part 1 (bootloader).
+- **vegas-freedom produces no bootloader image and is never run to unlock a bootloader.** It appears only in Part 3 (modem).
+- **NOT FOR THIS DEVICE:** a modem-unlock tool built for a different Motorola codename will not match vegas26. For example, a `kansas`-codename modem-unlock tool targets the `kansas` device, not `vegas26` (XT2617V). Use **vegas-freedom** for the modem here, nothing else. If a tool's `check` step does not print `CANDIDATE MATCH` against your stock `md1img`, it is the wrong tool or the wrong source build; stop.
+
+## Runbook: SIM unlock, copy-paste, Linux-first
+
+Flat, top-to-bottom order for SIM-unlocking a device you own. Each step is explained in detail in the numbered Parts below; this is the condensed run order so you do not have to re-derive it. Linux-first; the only Windows difference is the driver bind (see Prerequisites). Fill in your own `<SECRET>`, serial, and keys from your phone; keep them private.
+
+```bash
+# 0. PRE-CHECKS (confirm this is the right device/build/slot before anything)
+adb devices
+adb shell getprop ro.boot.hardware.sku             # XT2617V
+adb shell getprop ro.build.fingerprint             # note the -4-x build string
+adb shell getprop ro.build.version.security_patch
+adb shell getprop ro.boot.slot_suffix              # _a on the tested unit
+adb shell getprop ro.boot.flash.locked             # 1 = locked, 0 = already unlocked
+adb shell getprop gsm.sim.state                    # NETWORK_LOCKED before unlock
+
+# 1. LINUX USB (substitute for the Windows driver bind; see Prerequisites)
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="22b8", MODE="0660", GROUP="plugdev"' \
+  | sudo tee /etc/udev/rules.d/51-moto.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+# add your user to plugdev and replug if needed
+
+# 2. UNLOCK BOOTLOADER  -- ONLY if ro.boot.flash.locked = 1. THIS WIPES USERDATA.
+#    Full procedure is Part 1 (temp root -> backup -> val-protocol LK patch ->
+#    frp byte bypass -> fastboot oem unlock). Skip entirely if already unlocked.
+fastboot getvar securestate                        # expect flashing_unlocked when done
+
+# 3. BACKUP the protected set + modem (dd, pull, verify SHA-256 both sides). Part 1.2.
+for p in nvram nvdata seccfg persist prodpersist proinfo protect1 protect2 md1img_a; do
+  adb shell su -c "dd if=/dev/block/by-name/$p of=/sdcard/bk_$p.img"
+  adb pull /sdcard/bk_$p.img ./bk_$p.img
+  adb shell su -c "sha256sum /sdcard/bk_$p.img"; sha256sum ./bk_$p.img   # must match
+done
+# Keep bk_md1img_a.img as the revert. These are BACKED UP, NEVER FLASHED.
+
+# 4. GET STOCK md1img (the INPUT to the patcher, not what you flash)
+#    Pull the matching (or -4-7) stock firmware zip from the lolinet mirror;
+#    the standalone md1img.img is inside the zip. See Part 3 / Prerequisites.
+
+# 5. PATCH THE MODEM (vegas-freedom). The check gate is the safety.
+python modem/unlock_vegas.py check <stock_md1img.img>
+#   REQUIRE: 3/3 CATI symbols, 8/8 microMIPS32 signatures, "CANDIDATE MATCH". If not, STOP.
+python modem/unlock_vegas.py build --experimental-relocate -o md1img_patched.signed.img <stock_md1img.img>
+#   expect audit: entries=23 layout_ok=True integrity=True ; all sub-images hash_ok and rsa_ok
+
+# 6. FLASH -- A SLOT ONLY. Never md1img_b.
+adb reboot bootloader
+fastboot devices
+fastboot flash md1img_a md1img_patched.signed.img
+fastboot reboot
+
+# 7. VERIFY
+adb shell getprop gsm.sim.state                    # NETWORK_LOCKED -> LOADED
+# insert the target SIM; it should register on the carrier
+
+# 8. REVERT (only if the unlock did not take or anything is off)
+fastboot flash md1img_a bk_md1img_a.img && fastboot reboot
+```
+
+IMEI and calibration live in `nvram`/`nvdata`/`protect*`, which you only back up and never flash, so this cannot erase your IMEI.
 
 ## Tested device / compatibility
 
@@ -101,6 +175,12 @@ Tools:
 
 - **Android platform-tools** (adb/fastboot) 37.0.1+: https://developer.android.com/tools/releases/platform-tools
 - **Google USB Driver** (Windows, for the fastboot driver bind): https://developer.android.com/studio/run/win-usb
+- **Linux instead of the Windows driver:** no driver install. Add a udev rule for Motorola (USB VID `22b8`) so adb/fastboot can see the device without root, then replug:
+  ```bash
+  echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="22b8", MODE="0660", GROUP="plugdev"' | sudo tee /etc/udev/rules.d/51-moto.rules
+  sudo udevadm control --reload-rules && sudo udevadm trigger
+  ```
+  On Linux the separate bootloader/fastbootd driver binds that Windows needs do not apply.
 - **Python 3.10+** with `capstone` and `pyasn1` (for the LK patcher and the modem unlock).
 - For the optional overlays: **Android SDK build-tools** (`aapt2`, `apksigner`) and a JDK (both come with Android Studio).
 
@@ -110,7 +190,7 @@ Downloads and prior guides this builds on:
 - **DFRoot** (temporary root via CVE-2026-43284, used in Part 1): https://github.com/diabl0w/DFRoot (see its [wiki](https://github.com/diabl0w/DFRoot/wiki) and Releases)
 - **KernelSU manager** (used with DFRoot): https://github.com/tiann/KernelSU/releases
 - **LK bootloader patcher (Val Protocol):** https://github.com/Maikyxd/val-protocol
-- **Modem SIM-unlock tool (vegas-freedom):** https://github.com/andrewwm/vegas-freedom
+- **Modem SIM-unlock tool (vegas-freedom):** https://github.com/andrewwm/vegas-freedom , this is THE modem tool for vegas26. A modem-unlock tool built for another Motorola codename (for example a `kansas`-targeted one) is NOT for this device; do not substitute it. The `check` gate in Part 3 is what proves a tool/source matches your modem.
 - **LineageOS microG GSI builds:** the lineageos-4-microg / Colors project (SourceForge), or the MisterZtr GSI index: https://github.com/MisterZtr/LineageOS_gsi
 - **Stock firmware mirror** (for the `md1img`): https://mirrors.lolinet.com/firmware/moto/
 - **Google Android 16 GSI release notes** (documents the reboot-after-flash issue): https://developer.android.com/about/versions/16/gsi-release-notes
@@ -241,7 +321,9 @@ Restore the stock `system` from your backup, reflash stock `vbmeta`/`vbmeta_syst
 
 The network-lock (`gsm.sim.state = NETWORK_LOCKED`) is separate from the bootloader unlock and is enforced by the MediaTek modem (`md1img`). IMEI and calibration live in `nvram`/`nvdata`/`protect*`, NOT in `md1img`, so this cannot erase your IMEI.
 
-Tool: [vegas-freedom](https://github.com/andrewwm/vegas-freedom). Its `build` is pinned to the `-4-2` modem; newer builds use `check` then `build --experimental-relocate`. Source the `md1img` from a stock flashfile on the [lolinet mirror](https://mirrors.lolinet.com/firmware/moto/) (standalone `md1img.img` inside the zip). A `-4-7` modem patched this way runs fine on `-4-3`.
+Tool: [vegas-freedom](https://github.com/andrewwm/vegas-freedom). Its `build` is pinned to the `-4-2` modem; newer builds use `check` then `build --experimental-relocate`. Source the `md1img` from a stock flashfile on the [lolinet mirror](https://mirrors.lolinet.com/firmware/moto/) (standalone `md1img.img` inside the zip).
+
+**Verified compatibility (the one tested datapoint):** a `-4-7`-sourced stock `md1img`, patched with `--experimental-relocate`, runs fine on a `-4-3` phone. That is the only combination proven on hardware here. There is **no tested multi-version matrix and no committed hashes** (modem binaries are gitignored and device-sourced). So the safety gate is not a version table, it is the `check` step: **`check` must print `CANDIDATE MATCH` (3/3 CATI symbols, 8/8 microMIPS32 signatures) against your stock `md1img` before you build or flash.** If it does not, you have the wrong source build or the wrong tool; stop and do not flash.
 
 ```powershell
 # venv needs capstone and pyasn1
