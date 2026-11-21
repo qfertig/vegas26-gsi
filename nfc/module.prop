@@ -1,0 +1,6 @@
+id=vegas_nfc_hal_fix
+name=vegas NFC HAL fix (GSI)
+version=1.0
+versionCode=1
+author=vegas26-gsi contributors
+description=Starts the vendor NXP NFC HAL on a LineageOS GSI by setting persist.vendor.nfc.config_file_name, which fixes the com.android.nfc ANR loop and enables NFC.
