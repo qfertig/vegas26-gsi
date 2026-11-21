@@ -1,0 +1,9 @@
+# vegas26: system properties that repack.sh `bake` writes into /system/build.prop
+# (an existing line with the same key is replaced). Also usable as a Magisk module's
+# system.prop. See README Part 5.5.
+
+# Remote key provisioning. The Trustonic KeyMint on this phone has no factory attestation
+# keybox; stock gets its attestation keys from Google RKP. Without a hostname rkpd is disabled
+# ("RKP is disabled. System configured with no default URL") and every attested key
+# generation fails.
+remote_provisioning.hostname=remoteprovisioning.googleapis.com

@@ -14,12 +14,35 @@
 #   ./repack.sh build                      # build both overlay APKs into ./out/
 #   ./repack.sh bake  LineageOS-...-ext4-gsi.img.xz   # build + inject into the GSI
 #
+# `bake` also adds the system-side fixes from README Part 5.5 (NFC init rc, props/system.prop, SurfaceFlinger cpuset).
+#
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$HERE/out"
 ANDROID_JAR="${ANDROID_JAR:?set ANDROID_JAR to an android.jar, e.g. \$ANDROID_SDK/platforms/android-36.1/android.jar}"
 OVERLAY_DIR_IN_IMG="system/product/overlay"   # verify after mounting; GSIs are often nested one level
+SYSTEM_IN_IMG="system"                         # /system inside the image (same nesting as above)
+
+put_file() {
+  # Add or replace one file in the image.
+  # $1 = image, $2 = host file, $3 = path in image, $4 = SELinux label for a NEW file
+  # (a replaced file keeps the label it had; default u:object_r:system_file:s0).
+  local img="$1" src="$2" dst="$3" label="${4:-u:object_r:system_file:s0}" keep="$OUT/.selinux"
+  [ -f "$src" ] || { echo "missing $src" >&2; exit 1; }
+  rm -f "$keep"
+  debugfs -R "ea_get -f $keep $dst security.selinux" "$img" >/dev/null 2>&1 || true
+  debugfs -w -R "rm $dst" "$img" 2>/dev/null || true
+  debugfs -w -R "write $src $dst" "$img"
+  debugfs -w -R "sif $dst mode 0100644" "$img"
+  debugfs -w -R "sif $dst uid 0" "$img"
+  debugfs -w -R "sif $dst gid 0" "$img"
+  if [ -s "$keep" ]; then
+    debugfs -w -R "ea_set -f $keep $dst security.selinux" "$img"
+  else
+    debugfs -w -R "ea_set $dst security.selinux ${label}\\000" "$img"
+  fi
+}
 
 build_one() {
   # $1 = overlay source dir (contains AndroidManifest.xml + res/)
@@ -67,6 +90,36 @@ do_bake() {
     # Set SELinux label to match siblings (typically u:object_r:system_file:s0):
     debugfs -w -R "ea_set $OVERLAY_DIR_IN_IMG/${name}.apk security.selinux u:object_r:system_file:s0\\000" "$img"
   done
+
+  echo ">> NFC: init rc that starts the vendor NXP HAL (README Part 5.5)"
+  put_file "$img" "$HERE/init/vegas26-nfc.rc" "$SYSTEM_IN_IMG/etc/init/vegas26-nfc.rc"
+
+  echo ">> props: props/system.prop into /system/build.prop (README Part 5.5)"
+  rm -f "$OUT/build.prop"
+  debugfs -R "dump $SYSTEM_IN_IMG/build.prop $OUT/build.prop" "$img"
+  [ -s "$OUT/build.prop" ] || { echo "no $SYSTEM_IN_IMG/build.prop in the image" >&2; exit 1; }
+  printf '\n# vegas26-gsi repack.sh\n' >> "$OUT/build.prop"
+  local line key
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}"
+    sed -i "/^${key//./\\.}=/d" "$OUT/build.prop"   # ours replaces any existing value
+    echo "$line" >> "$OUT/build.prop"
+  done < "$HERE/props/system.prop"
+  put_file "$img" "$OUT/build.prop" "$SYSTEM_IN_IMG/build.prop"
+
+  echo ">> task_profiles: SurfaceFlinger main + RenderEngine on all cores (README Part 5.5)"
+  # AOSP puts SFMainPolicy / SFRenderEnginePolicy in cpuset system-background, which on MT6835
+  # is the little cores only. Switch both to foreground (all cores).
+  local tp="$OUT/task_profiles.json" p
+  rm -f "$tp"
+  debugfs -R "dump $SYSTEM_IN_IMG/etc/task_profiles.json $tp" "$img"
+  sed -i -E '/"Name": "SF(Main|RenderEngine)Policy"/,/"Path"/ s/"system-background"/"foreground"/' "$tp"
+  for p in SFMainPolicy SFRenderEnginePolicy; do
+    grep -A8 "\"Name\": \"$p\"" "$tp" | grep -q '"Path": "foreground"' \
+      || { echo "WARN: $p not found as expected, task_profiles.json left as is" >&2; tp=""; break; }
+  done
+  [ -z "$tp" ] || put_file "$img" "$tp" "$SYSTEM_IN_IMG/etc/task_profiles.json"
 
   echo ">> fsck + recompress"
   e2fsck -fy "$img" || true

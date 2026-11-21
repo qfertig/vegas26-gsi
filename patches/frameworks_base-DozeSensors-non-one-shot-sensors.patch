@@ -1,0 +1,127 @@
+SystemUI: DozeSensors: listen to non-one-shot wake-up gesture sensors
+
+Apply in frameworks/base of a GSI source tree (git apply). Applies cleanly to
+LineageOS lineage-23.2; built and tested on a PixelOS 16 GSI on vegas26.
+
+requestTriggerSensor() only accepts REPORTING_MODE_ONE_SHOT sensors, so a
+doze double-tap sensor that the vendor HAL exposes as a special-trigger
+wake-up sensor (Motorola "dt-gesture", com.motorola.sensor.double_tap) was
+never registered and double tap to wake did nothing. Register such sensors
+with a plain SensorEventListener and handle their events exactly like a
+trigger, without dropping the registration after each event.
+
+diff --git a/packages/SystemUI/src/com/android/systemui/doze/DozeSensors.java b/packages/SystemUI/src/com/android/systemui/doze/DozeSensors.java
+index 329a51a92..9fa18c7c6 100644
+--- a/packages/SystemUI/src/com/android/systemui/doze/DozeSensors.java
++++ b/packages/SystemUI/src/com/android/systemui/doze/DozeSensors.java
+@@ -28,6 +28,8 @@ import android.annotation.AnyThread;
+ import android.content.res.Resources;
+ import android.database.ContentObserver;
+ import android.hardware.Sensor;
++import android.hardware.SensorEvent;
++import android.hardware.SensorEventListener;
+ import android.hardware.SensorManager;
+ import android.hardware.TriggerEvent;
+ import android.hardware.TriggerEventListener;
+@@ -569,6 +571,40 @@ public class DozeSensors {
+         protected boolean mIgnoresSetting;
+         private @DevicePostureController.DevicePostureInt int mPosture;
+ 
++        // Vendor gesture sensors that are wake-up but not one-shot (e.g. Motorola's
++        // "dt-gesture", com.motorola.sensor.double_tap, REPORTING_MODE_SPECIAL_TRIGGER) are
++        // rejected by requestTriggerSensor(). Listen to those with a plain listener instead.
++        private final SensorEventListener mContinuousListener = new SensorEventListener() {
++            @Override
++            public void onSensorChanged(SensorEvent event) {
++                handleTrigger(event.values, false /* oneShot */);
++            }
++
++            @Override
++            public void onAccuracyChanged(Sensor sensor, int accuracy) {
++            }
++        };
++
++        private boolean isOneShot(Sensor sensor) {
++            return sensor.getReportingMode() == Sensor.REPORTING_MODE_ONE_SHOT;
++        }
++
++        private boolean registerSensor(Sensor sensor) {
++            if (isOneShot(sensor)) {
++                return mSensorManager.requestTriggerSensor(this, sensor);
++            }
++            return mSensorManager.registerListener(mContinuousListener, sensor,
++                    SensorManager.SENSOR_DELAY_NORMAL);
++        }
++
++        private boolean unregisterSensor(Sensor sensor) {
++            if (isOneShot(sensor)) {
++                return mSensorManager.cancelTriggerSensor(this, sensor);
++            }
++            mSensorManager.unregisterListener(mContinuousListener, sensor);
++            return true;
++        }
++
+         TriggerSensor(
+                 Sensor sensor,
+                 String setting,
+@@ -754,7 +790,7 @@ public class DozeSensors {
+ 
+             // cancel the previous sensor:
+             if (mRegistered) {
+-                final boolean rt = mSensorManager.cancelTriggerSensor(this, oldSensor);
++                final boolean rt = unregisterSensor(oldSensor);
+                 mDozeLog.traceSensorUnregisterAttempt(oldSensor.toString(), rt, "posture changed");
+                 mRegistered = false;
+             }
+@@ -800,13 +836,13 @@ public class DozeSensors {
+             if (!mConfigured || sensor == null) return;
+             if (mRequested && !mDisabled && (enabledBySetting() || mIgnoresSetting)) {
+                 if (!mRegistered) {
+-                    mRegistered = mSensorManager.requestTriggerSensor(this, sensor);
++                    mRegistered = registerSensor(sensor);
+                     mDozeLog.traceSensorRegisterAttempt(sensor.toString(), mRegistered);
+                 } else {
+                     mDozeLog.traceSkipRegisterSensor(sensor.toString());
+                 }
+             } else if (mRegistered) {
+-                final boolean rt = mSensorManager.cancelTriggerSensor(this, sensor);
++                final boolean rt = unregisterSensor(sensor);
+                 mDozeLog.traceSensorUnregisterAttempt(sensor.toString(), rt);
+                 mRegistered = false;
+             }
+@@ -842,6 +878,11 @@ public class DozeSensors {
+         @Override
+         @AnyThread
+         public void onTrigger(TriggerEvent event) {
++            handleTrigger(event.values, true /* oneShot */);
++        }
++
++        @AnyThread
++        private void handleTrigger(float[] values, boolean oneShot) {
+             final Sensor sensor = mSensors[mPosture];
+             mDozeLog.traceSensor(mPulseReason);
+             mHandler.post(mWakeLock.wrap(() -> {
+@@ -849,15 +890,18 @@ public class DozeSensors {
+                     UI_EVENT_LOGGER.log(DozeSensorsUiEvent.ACTION_AMBIENT_GESTURE_PICKUP);
+                 }
+ 
+-                mRegistered = false;
++                // A one-shot trigger sensor disarms itself; a continuous listener stays.
++                if (oneShot) {
++                    mRegistered = false;
++                }
+                 float screenX = -1;
+                 float screenY = -1;
+-                if (mReportsTouchCoordinates && event.values.length >= 2) {
+-                    screenX = event.values[0];
+-                    screenY = event.values[1];
++                if (mReportsTouchCoordinates && values.length >= 2) {
++                    screenX = values[0];
++                    screenY = values[1];
+                 }
+                 mSensorCallback.onSensorPulse(mPulseReason, mPerformsProxCheck,
+-                        screenX, screenY, event.values);
++                        screenX, screenY, values);
+                 if (!mRegistered && mImmediatelyReRegister) {
+                     updateListening();
+                 }

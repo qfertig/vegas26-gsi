@@ -281,6 +281,7 @@ All optional, all non-destructive. Two of these have a rootless path that works 
 
 ### 5.1 Second rear camera
 The HAL exposes all cameras (`dumpsys media.camera` shows 3). LineageOS Aperture hides the aux rear lens because `config_enableAuxCameras` defaults to false on a GSI.
+(The ultrawide only shows up because LineageOS reports `ro.product.manufacturer=motorola`: the vendor sensor HAL, `libcam.halsensor.so` `HalSensorList::isGsiMode()`, probes every sensor only when that property is `motorola` or `lenovo`, otherwise just main and front. A GSI that reports another maker, PixelOS for example, shows 2 cameras until it sets `ro.product.manufacturer=motorola`.)
 - **Rootless (works now):** install [Open Camera](https://f-droid.org/packages/net.sourceforge.opencamera/), set Settings, Camera API, Camera2 API; the camera-switch button (and the "camera +" control) selects the 2nd rear lens.
 - **Rooted (stock Material app):** deploy the Aperture RRO in `overlays/aperture-aux/` (sets `config_enableAuxCameras=true`) so the stock Aperture app itself shows both lenses. See 5.4 for deployment.
 
@@ -302,6 +303,33 @@ This step needs root, once. On this device:
 
 This is the one advanced, device-specific step and was not fully hardened in this writeup; treat it as a starting point and verify `cmd overlay list` shows your overlays enabled after a reboot.
 
+### 5.5 System fixes baked by `repack.sh`
+These live in `system` (not `/product`), so they come from `repack.sh bake` and have to be baked again into each new GSI image. They were found while porting another GSI (PixelOS 16) to this phone with the same stock vendor; see each item for what was tested where.
+
+**NFC.** On a GSI, NFC does not turn on and `com.android.nfc` ANRs every ~15 s (`init: Could not find 'android.hardware.nfc@1.2::INfc/default' for ctl.interface_start`). The vendor NXP HAL (`vendor.nfc_hal_service`) is `disabled` and only starts on `ro.vendor.hw.nfc=nq && persist.vendor.nfc.config_file_name=*`; on stock a Motorola component sets the second property, a GSI does not. `init/vegas26-nfc.rc` sets `persist.vendor.nfc.config_file_name=libnfc-nxp.conf` when `ro.vendor.hw.nfc=nq`, and `bake` puts it in `/system/etc/init`.
+- Verified on LineageOS 23.2 microG by setting the same property at boot from a Magisk module (`resetprop`): no more ANRs, the HAL registers, `dumpsys nfc` shows `mState=on`. The init-rc form is what the PixelOS port ships (HAL registered there).
+- Without baking: a Magisk module whose `post-fs-data.sh` runs `resetprop persist.vendor.nfc.config_file_name libnfc-nxp.conf` does the same.
+
+**Hardware key attestation (RKP).** The Trustonic KeyMint on this phone has no factory attestation keybox (there is no `attest_keybox.so` on `persist`); stock gets its attestation keys from Google's Remote Key Provisioning (`ro.rkp.csr_uploaded=1`). If the GSI does not set `remote_provisioning.hostname`, rkpd is off (`RKP is disabled. System configured with no default URL` in logcat) and every attested key generation fails (keystore2 `INVALID_ARGUMENT`). `props/system.prop` sets `remote_provisioning.hostname=remoteprovisioning.googleapis.com`; `bake` writes it into `/system/build.prop`. With it the attestation chain goes TEE to Google's roots.
+- Tested on the PixelOS 16 GSI (same vendor). **Not checked on LineageOS**: first run `adb shell getprop remote_provisioning.hostname`; if it already prints the Google host, this changes nothing.
+- This does not make Play Integrity STRONG: the TEE reports the bootloader as unlocked.
+- Without baking: put the same line in a Magisk module's `system.prop`.
+
+**SurfaceFlinger on the little cores.** AOSP's `/system/etc/task_profiles.json` puts the SurfaceFlinger main thread (`SFMainPolicy`) and RenderEngine (`SFRenderEnginePolicy`) in the `system-background` cpuset, which on MT6835 (2x A76 + 6x A55) is cpus 0-5, the A55 cores only. The stock MediaTek SurfaceFlinger moves these threads itself; a GSI SurfaceFlinger does not, and a perfetto trace showed SurfaceFlinger "stuffing" and missed frames. `bake` switches both policies to the `foreground` cpuset (all cores); the vendor `task_profiles.json` does not override them. LineageOS 23.2 has the same AOSP values.
+- Built into the PixelOS 16 GSI and boots there; the jank improvement has **not been measured** yet, and it is **untested on LineageOS**. To check: `adb shell 'cat /proc/$(pidof surfaceflinger)/cpuset'` should print `/foreground`.
+
+### 5.6 Double tap to wake (needs a SystemUI change, not fixable by overlay)
+Double tap to wake does not work on a GSI here, and an overlay or a keylayout alone cannot fix it. How it works on the stock vendor:
+1. The gesture is armed by writing `49` to `/sys/class/touchscreen/primary/gesture` (`48` = off). On stock, Motorola's touch service does this; nothing does on a GSI.
+2. With the screen off, the FocalTech driver reports a double tap as `KEY_F4` on the input device `double-tap`.
+3. The vendor sensors sub-HAL `sensors.moto.so` grabs that input device (`EVIOCGRAB`) and turns it into the wake-up sensor `dt-gesture`, type `com.motorola.sensor.double_tap` (65566), reporting mode `SPECIAL_TRIGGER`. Because of the grab, `getevent` and InputReader never see the key, so a `double-tap.kl` keylayout does nothing.
+4. SystemUI Doze has to listen to that sensor: overlay `config_dozeDoubleTapSensorType=com.motorola.sensor.double_tap` on `android`. Not `com.motorola.sensor.tap` ("Mot Tap"): that is an unrelated sensor-hub sensor.
+5. But AOSP SystemUI `DozeSensors` registers doze sensors with `requestTriggerSensor()`, which only accepts `ONE_SHOT` sensors, so `dt-gesture` is refused (`AsyncSensorManager: Requesting ... failed`). LineageOS 23.2 `DozeSensors` is the same (checked in `lineage-23.2` source).
+
+So it needs all three: the gesture write at boot, the sensor-type overlay, and a SystemUI built with `patches/frameworks_base-DozeSensors-non-one-shot-sensors.patch` (registers non-one-shot wake-up sensors with a normal listener; applies cleanly to LineageOS `lineage-23.2`). That means building the GSI, not repacking it. On the PixelOS 16 GSI with all three, a screen-off double tap wakes the phone; detection itself is in the touch firmware, which sometimes misses a tap. Not tested on LineageOS.
+
+To check the first part on any build: `adb shell dumpsys sensorservice | grep -i -A3 dt-gesture` lists the sensor, and while dozing an active connection from `com.android.systemui` means Doze is listening.
+
 ---
 
 ## Troubleshooting
@@ -317,7 +345,11 @@ This is the one advanced, device-specific step and was not fully hardened in thi
 | "SIM network unlock PIN" / `NETWORK_LOCKED` | Carrier lock in the modem | Part 3. |
 | Signal bars but no data, "!" on the signal icon | Wrong or missing APN | Select the `ereseller` (or your carrier's) APN, toggle airplane mode (Part 4.1). |
 | Calls fail but data works | GSI lacks MediaTek IMS | Use LineageOS 23.2 microG (ships `com.mediatek.ims`). |
+| `dumpsys media.camera` shows only 2 cameras (no ultrawide) | Vendor sensor HAL treats the system as a GSI unless `ro.product.manufacturer` is `motorola`/`lenovo`, and then probes only main and front | Check `adb shell getprop ro.product.manufacturer`; if it is not `motorola`, add `ro.product.manufacturer=motorola` to `props/system.prop` and bake (Part 5.1). |
 | Overlay install fails: "signed with different certificates" | Framework overlays can't be sideloaded on this GSI | Deploy to `/product/overlay` with root (Part 5.4). |
+| NFC won't turn on, `com.android.nfc` ANRs every ~15 s | Vendor NXP HAL never started (`persist.vendor.nfc.config_file_name` unset on a GSI) | Bake `init/vegas26-nfc.rc` with `repack.sh` (Part 5.5). |
+| Apps that need hardware key attestation fail; logcat: `RKP is disabled. System configured with no default URL` | No `remote_provisioning.hostname`, no factory attestation keybox on this phone | Bake `props/system.prop` with `repack.sh`, or set it from a Magisk `system.prop` (Part 5.5). |
+| UI micro-stutter, perfetto shows SurfaceFlinger stuffing / missed frames | SurfaceFlinger main thread and RenderEngine pinned to the little cores by AOSP `task_profiles.json` | Bake with `repack.sh` (moves them to the `foreground` cpuset, Part 5.5). Effect not measured yet. |
 
 ## How updates work
 
@@ -334,6 +366,9 @@ Your `/data`, apps, settings, your `/product` overlays (Part 5), and your modem 
 - `README.md` , this guide.
 - `overlays/cutout/` , framework RRO source for a centered display cutout (edit `res/values/config.xml` to match your camera).
 - `overlays/aperture-aux/` , RRO source to make the stock Aperture camera expose the 2nd rear lens.
+- `init/vegas26-nfc.rc` , init snippet that starts the vendor NFC HAL on a GSI (Part 5.5).
+- `props/system.prop` , system properties `repack.sh` writes into `/system/build.prop` (Part 5.5).
+- `patches/frameworks_base-DozeSensors-non-one-shot-sensors.patch` , SystemUI change needed for double tap to wake, for people building a GSI (Part 5.6).
 - `repack.sh` , reference script to build the overlays and (optionally) bake them into an ext4 GSI's `/system/product/overlay`, for anyone who wants a prebuilt image instead of deploying overlays by hand.
 
 ## Credits and prior work
