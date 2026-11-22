@@ -122,9 +122,10 @@ IMEI and calibration live in `nvram`/`nvdata`/`protect*`, which you only back up
 | Security patch | 2026-06-01 |
 | Kernel | `5.15.189-android13-8-...` |
 | SoC | MediaTek MT6835 (Dimensity 6300) |
+| Baseband (known-good on `-4-3`) | `MT6835O_NR17.RC.MP.V18.6.6.P107.02.309R` |
 | Active slot | `_a` |
 
-If your `-4-x`, patch, or kernel differ, re-verify every step. A tool printing "VALID" is not proof your unit will boot a patched image.
+If your `-4-x`, patch, or kernel differ, re-verify every step. A tool printing "VALID" is not proof your unit will boot a patched image. (The underlying [parsimo2010 base guide](https://github.com/parsimo2010/moto-g-power-2026-straight-talk-wifi-root-guide) was proven on `-4-2`; this guide and an independent community report confirm the same flow on `-4-3`.)
 
 ## Warnings
 
@@ -188,6 +189,7 @@ Downloads and prior guides this builds on:
 
 - **Base bootloader guide** (validated on `-4-2`; source of the pinned APK hashes used in Part 1): [parsimo2010/moto-g-power-2026-straight-talk-wifi-root-guide](https://github.com/parsimo2010/moto-g-power-2026-straight-talk-wifi-root-guide)
 - **DFRoot** (temporary root via CVE-2026-43284, used in Part 1): https://github.com/diabl0w/DFRoot (see its [wiki](https://github.com/diabl0w/DFRoot/wiki) and Releases)
+- **DirtyFrag** (alternative temporary-root tool, same purpose as DFRoot, if one stops working on a future patch): https://github.com/mitschud/DirtyFrag
 - **KernelSU manager** (used with DFRoot): https://github.com/tiann/KernelSU/releases
 - **LK bootloader patcher (Val Protocol):** https://github.com/Maikyxd/val-protocol
 - **Modem SIM-unlock tool (vegas-freedom):** https://github.com/andrewwm/vegas-freedom , this is THE modem tool for vegas26. A modem-unlock tool built for another Motorola codename (for example a `kansas`-targeted one) is NOT for this device; do not substitute it. The `check` gate in Part 3 is what proves a tool/source matches your modem.
@@ -218,6 +220,13 @@ adb shell getprop ro.build.version.security_patch # 2026-06-01
 adb shell getprop ro.boot.slot_suffix             # _a
 adb shell getprop ro.boot.flash.locked            # 1 (locked)
 ```
+
+**Block updates before you do anything else.** An automatic OTA can patch out the exact vulnerabilities this process depends on (the temp-root CVE and the LK weakness), and once patched there is no known way back in. Turn Wi-Fi off and keep it off until the bootloader is unlocked, and belt-and-suspenders it with:
+```powershell
+adb shell svc wifi disable
+adb shell settings put global ota_disable_automatic_update 1   # extra precaution; does not cancel an already-staged update
+```
+If an update is already downloading, turn Wi-Fi off; if it has staged and wants a restart, do NOT restart until you have temp root and have checked the slot state.
 
 ### 1.1 Temporary root (reversible, undone by reboot)
 Install the KernelSU manager + DFRoot APKs (hash-verify against the base guide), then on the phone:
@@ -272,6 +281,26 @@ fastboot oem unlock <ONE OF YOUR KEYS>
 fastboot getvar securestate              # -> flashing_unlocked
 ```
 Low-risk: a wrong byte just means unlock is refused again (no wipe), and unlocking disables FRP anyway.
+
+### 1.5 After the unlock wipe: get past the carrier activation screen
+
+Unlocking the bootloader erases userdata (so does any later `/data` wipe, e.g. for a GSI). On a Straight Talk / Tracfone unit the phone then boots to a carrier **activation screen** you cannot pass without a plan, which strands the whole process if you are not ready for it. Get around it with Google's official **Test DPC** enterprise provisioning. This is ordinary Android setup provisioning on a device you own; it is not cellular activation or SIM unlocking.
+
+1. Power off and **remove the carrier SIM** (so it cannot re-assert a network lock during setup), then boot.
+2. At the first Welcome/Hello screen, tap the **same blank spot six times** to open Android's enterprise-provisioning QR scanner.
+3. Scan Google's official [Test DPC QR](https://raw.githubusercontent.com/googlesamples/android-testdpc/master/qrcode.png) (from the [Test DPC project](https://github.com/googlesamples/android-testdpc#provisioning)). Connect to Wi-Fi so Test DPC downloads. Use the Google QR only, never a QR from an unknown administrator.
+4. Choose **Use for work only**, then at Finish Setup tap **Finish**. You land on the home screen.
+5. **Turn Wi-Fi off immediately** and keep updates blocked (see the Part 1 update note) until the bootloader is unlocked.
+6. Enable Developer options (tap Build number seven times) and turn on USB debugging.
+7. **Remove the Test DPC device-owner** so nothing stays managed (its own UI may crash; the ADB service path works):
+```powershell
+adb shell dumpsys activity service com.afwsamples.testdpc/.DeviceAdminService clear-device-owner
+adb shell dumpsys device_policy          # should show NO Device Owner / Profile Owner
+adb shell pm uninstall com.afwsamples.testdpc   # expect: Success
+```
+Do not just uninstall an active device owner or factory-reset to clear it; clear ownership first with the command above. Do not scan the QR again once setup is complete.
+
+You repeat this entire setup every time userdata is wiped: once after the bootloader unlock, and again if you later factory-reset for a GSI. Credit: the [parsimo2010 base guide](https://github.com/parsimo2010/moto-g-power-2026-straight-talk-wifi-root-guide) documents this Test DPC flow; an independent community report corroborated it on `-4-3` (using a ManageEngine MDM as an alternative route to the same bypass).
 
 ---
 
@@ -396,6 +425,7 @@ This is the one advanced, device-specific step and was not fully hardened in thi
 | GSI boots once, then "Can't load Android system" on every reboot | `fastboot -w` doesn't format `/data` | Wipe via **recovery factory reset** (Part 2.2). |
 | Can't find "Wipe data" in recovery | Menu is hidden behind "No command" | Hold **Power**, tap **Volume Up** once (Part 2.2). |
 | `fastboot oem unlock` says "Check 'Allow OEM Unlock'" | Carrier restriction | `frp` last-byte bypass (Part 1.4). |
+| Stuck at the carrier activation / setup screen after a wipe | Tracfone activation lock on a device with no plan | Google Test DPC provisioning bypass, then remove the device-owner (Part 1.5). |
 | "SIM network unlock PIN" / `NETWORK_LOCKED` | Carrier lock in the modem | Part 3. |
 | Signal bars but no data, "!" on the signal icon | Wrong or missing APN | Select the `ereseller` (or your carrier's) APN, toggle airplane mode (Part 4.1). |
 | Calls fail but data works | GSI lacks MediaTek IMS | Use LineageOS 23.2 microG (ships `com.mediatek.ims`). |
