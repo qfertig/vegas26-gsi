@@ -22,6 +22,7 @@ Verified end to end on a real device, 2026-11.
 - [Part 3: SIM / network unlock (modem)](#part-3-sim--network-unlock-modem)
 - [Part 4: Cellular, APN and VoLTE](#part-4-cellular-apn-and-volte)
 - [Part 5: Optional polish (cameras, cutout, density)](#part-5-optional-polish-cameras-cutout-density)
+- [Part 6: Full-GApps variant (RCS, and keeping VoLTE)](#part-6-full-gapps-variant-rcs-and-keeping-volte)
 - [Troubleshooting](#troubleshooting)
 - [How updates work](#how-updates-work)
 - [Repo contents](#repo-contents)
@@ -372,7 +373,7 @@ Result: `gsm.sim.state` goes `NETWORK_LOCKED` to `LOADED`, registered on your ca
 ## Part 4: Cellular, APN and VoLTE
 
 ### 4.1 Mobile data (APN)
-Enter your carrier's APN. For US Mobile Dark Star it is `ereseller` (LineageOS already ships matching "Tracfone AT&T" / "ereseller" entries; just select one in Settings, Network and internet, SIMs, the SIM, Access Point Names). Toggle airplane mode once if it is slow to attach.
+Enter your carrier's APN. For US Mobile Dark Star it is `ereseller` (LineageOS already ships matching "Tracfone AT&T" / "ereseller" entries; just select one in Settings, Network and internet, SIMs, the SIM, Access Point Names). Toggle airplane mode once if it is slow to attach. If the right entry does not appear in the list, or you get bars but no data, your MVNO SIM's MCC/MNC probably differs from the serving network's, see the APN gotcha in [Part 6.4](#64-mvno-apn-gotcha-sim-numeric--network-numeric).
 
 ### 4.2 VoLTE (works natively on LineageOS)
 On a clean LineageOS 23.2 microG install, with no extra steps, VoLTE calls work because the GSI ships the real MediaTek IMS stack:
@@ -415,6 +416,65 @@ This is the one advanced, device-specific step and was not fully hardened in thi
 
 ---
 
+## Part 6: Full-GApps variant (RCS, and keeping VoLTE)
+
+The main guide uses **microG** for a de-Googled daily driver. microG **cannot do RCS** (Google Messages chat features): RCS needs real Google Play Services, Google's Jibe backend, and a passing Play Integrity check, none of which microG provides. If you want RCS, flash a **full-GApps** LineageOS 23.2 GSI instead of the microG one. Everything else in this guide (unlock, modem, APN) is identical. This variant was verified end to end on the tested device.
+
+### 6.1 Flash the GApps GSI (expect a wipe, not a hot-swap)
+Use a full-GApps arm64 **A/B, ext4** build (e.g. a MisterZtr `...-GAPPS-EXT4-GSI` image, or any full-GApps LineageOS 23.2 GSI). Flash it to `system` exactly as in [Part 2.3](#23-flash-recovery-wipe-not--w).
+
+**microG → GApps is NOT a clean hot-swap.** Unlike swaps between two microG/vanilla builds (Part 2.4), going from microG to real GMS **bootloops**: both register the package name `com.google.android.gms`, and real Play Services cannot start on microG's leftover `/data`. When it loops, **factory reset from recovery** (Part 2.2), then it boots clean. So treat this as a wiping flash. (Your modem unlock in `md1img` is untouched by this.)
+
+### 6.2 RCS works with no root and no Play Integrity hack
+The common claim is "custom ROMs / GSIs can't do RCS because of Play Integrity." On the tested device that was **false**: on a full-GApps LineageOS 23.2 GSI with an **unlocked bootloader and no root**, Google Messages registered RCS immediately (**Status: Connected**) with no Magisk and no Play Integrity Fix module. Steps:
+1. Sign into a Google account; install **Google Messages** from the Play Store (use the Play version, not a sideload).
+2. Set it as the default SMS app.
+3. Messages → Settings → **RCS chats** → it verifies your number → **Connected**.
+
+**Do not root this phone to "help" RCS.** Root weakens Play Integrity; if RCS is already connecting unrooted, rooting risks breaking it. (If your build does *not* pass, that is when Magisk + a Play Integrity Fix module becomes relevant, but try bare first, you may not need it.)
+
+### 6.3 Restore VoLTE on a GApps build that lacks MediaTek IMS
+Unlike the microG build, a full-GApps **TrebleDroid** GSI may **not bundle `com.mediatek.ims`**, so after the swap you get data + RCS but **no calls** (VoLTE cannot register). Check:
+```
+adb shell pm list packages | grep mediatek.ims     # empty on an affected build
+```
+If it is missing, the TrebleDroid phh helper can install it. Open **Treble Settings** (`me.phh.treble.app`):
+```
+adb shell am start -n me.phh.treble.app/.SettingsActivity
+```
+Go to **IMS** and run, in order:
+1. **Install IMS APK for MediaTek R+ vendor** (installs the IMS service; approve the install prompt, needs network). Your vendor is Android 13, i.e. "R+", so this applies.
+2. **Create IMS APN** (adds the `ims`-type APN registration needs).
+3. **Force the presence of 4G calling setting** (surfaces the VoLTE toggle).
+4. **Request IMS network**.
+
+Reboot, then Settings → Network → SIMs → [SIM] → turn on **VoLTE / 4G Calling**, and reboot once more. Confirm the IMS bearer is up:
+```
+adb shell dumpsys telephony.registry | grep -i "ims"
+#   look for an ims-type APN (e.g. "ATT IMS") state: CONNECTED, with PcscfAddresses: [...]
+```
+A connected `ims` APN with `PcscfAddresses` means VoLTE signaling is established, place a test call. As in Part 4.2, `carrier_volte_available_bool=false` and `mVopsSupport=2` can both persist while VoLTE works via this path; trust a live call, not those flags.
+
+### 6.4 MVNO APN gotcha (SIM numeric ≠ network numeric)
+Some MVNOs provision a SIM whose MCC/MNC differs from the network it rides. On the tested **US Mobile Dark Star** SIM, the SIM reads `310/280` but the serving network is `310/410`. Two things then bite on a GSI: the APN editor **only lists APNs matching the SIM's numeric (310/280)**, and this GSI's editor **hides the MCC/MNC fields**, so the built-in US Mobile `ereseller` entry (tagged `310/410`) never appears and data fails with bars-but-no-data (the `!` icon).
+
+Fix: create an APN whose MCC/MNC match the **SIM** (`310/280`). Because the editor hides those fields, set them via adb; shell writes to the APN provider are allowed here (no root):
+```bash
+adb shell content insert --uri content://telephony/carriers \
+  --bind name:s:Darkstar --bind numeric:s:310280 --bind mcc:s:310 --bind mnc:s:280 \
+  --bind apn:s:ereseller --bind type:s:default,supl,mms --bind protocol:s:IPV4V6 --bind current:i:1
+# verify:
+adb shell content query --uri content://telephony/carriers --projection name:apn:mcc:mnc | grep -i darkstar
+```
+Then select it in Settings, and add **MMSC/proxy/port** there for picture messaging (the editor *does* expose MMS fields; it chokes only on the colon in an MMSC URL passed via `content`, so add those in the UI). Match your own carrier's values, the portable lesson is **match the SIM's numeric, not the network's**.
+
+### 6.5 Transition-animation jank is inherent to GSIs here (and another ROM won't fix it)
+On any GSI on this device, full-screen **transition** animations (opening/closing apps and menus) are slightly choppy, while **scrolling and video are smooth**. Cause: the generic AOSP framework does not trigger MediaTek's launch/transition CPU-GPU boost the way stock's framework does, so the SoC sits at an idle clock at the first frame of a transition (after your finger lifts) and drops a few frames before ramping. Confirmed on the tested unit by watching `scaling_cur_freq` (low during transitions, pinned high during scroll).
+
+What does **not** fix it: 120Hz is already active (refresh rate is not the cause), "Disable HW overlays" (composition is not the cause), and lowering animation scale (only shortens the window). The real fix needs **root** (a Magisk CPU/GPU frequency-floor module) which would risk the RCS integrity pass, so on an RCS daily driver it is best left alone. A different GSI (crDroid, Evolution X, YAAP, etc.) will **not** fix it either, it is a GSI-wide gap, not a build-specific bug; only a device-specific ROM (none exists for vegas26) would. One upside: once `/data` is formatted (Part 2.2) you can freely hot-swap GSIs to try them, but test VoLTE (Part 6.3) and re-verify RCS on each, and keep your working image as the fallback.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -428,7 +488,11 @@ This is the one advanced, device-specific step and was not fully hardened in thi
 | Stuck at the carrier activation / setup screen after a wipe | Tracfone activation lock on a device with no plan | Google Test DPC provisioning bypass, then remove the device-owner (Part 1.5). |
 | "SIM network unlock PIN" / `NETWORK_LOCKED` | Carrier lock in the modem | Part 3. |
 | Signal bars but no data, "!" on the signal icon | Wrong or missing APN | Select the `ereseller` (or your carrier's) APN, toggle airplane mode (Part 4.1). |
-| Calls fail but data works | GSI lacks MediaTek IMS | Use LineageOS 23.2 microG (ships `com.mediatek.ims`). |
+| Calls fail but data works | GSI lacks MediaTek IMS | Use LineageOS 23.2 microG (ships `com.mediatek.ims`), or on a GApps build install it via Treble Settings → IMS (Part 6.3). |
+| RCS (Google Messages chat) won't turn on | microG can't do RCS | Flash a full-GApps GSI; RCS then connects with no root (Part 6.2). |
+| Full-GApps GSI: data + RCS work, but no calls | GApps/TrebleDroid build didn't bundle `com.mediatek.ims` | Treble Settings → IMS → Install IMS APK for MediaTek R+ → Create IMS APN → Force 4G calling → reboot (Part 6.3). |
+| MVNO: bars but "!", correct APN not in the list | SIM's MCC/MNC differs from the network's; editor hides MCC/MNC | Create an APN matching the SIM's numeric via `content insert` (Part 6.4). |
+| Transitions choppy but scrolling smooth on a GSI | Generic framework doesn't trigger MediaTek's launch perf-boost | Inherent to GSIs here; not fixable without root, and another GSI won't fix it (Part 6.5). |
 | Overlay install fails: "signed with different certificates" | Framework overlays can't be sideloaded on this GSI | Deploy to `/product/overlay` with root (Part 5.4). |
 
 ## How updates work
@@ -466,3 +530,7 @@ Your `/data`, apps, settings, your `/product` overlays (Part 5), and your modem 
 - LineageOS 23.2 microG gives data, SMS, and VoLTE (ships `com.mediatek.ims`). Pick it over GSIs that lack the MediaTek IMS stack.
 - SIM unlock: vegas-freedom `check` (8/8), `build --experimental-relocate`, `fastboot flash md1img_a`; `NETWORK_LOCKED` to `LOADED`. Stock `md1img` kept as revert; IMEI untouched.
 - Custom overlays must live in a trusted partition (`/product/overlay`, survives updates); needs Magisk root once. Rootless alternatives: Open Camera, and a built-in cutout emulation overlay.
+- Want **RCS**? Use a full-GApps GSI instead of microG (microG can't do RCS). RCS connected with no root / no Play Integrity hack on the unlocked GSI. microG→GApps bootloops, so factory-reset after that flash (Part 6).
+- GApps GSI with no `com.mediatek.ims`: restore VoLTE via Treble Settings → IMS → Install IMS APK for MediaTek R+ → Create IMS APN → Force 4G calling (Part 6.3).
+- MVNO data dead with the "correct" APN missing: SIM numeric may differ from the network (US Mobile Dark Star SIM = 310/280, network 310/410); create an APN matching the SIM via `content insert` (Part 6.4).
+- GSI transition jank (choppy transitions, smooth scroll) = missing MediaTek launch perf-boost; no non-root fix, and no other GSI fixes it (Part 6.5).
